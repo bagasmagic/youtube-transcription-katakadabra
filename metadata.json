@@ -1,0 +1,6 @@
+{
+  "name": "YouTube Transcript Extractor API",
+  "description": "FastAPI YouTube Transcript Extractor API dengan deteksi bahasa otomatis, sistem fallback, dan penerjemahan otomatis otomatis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
