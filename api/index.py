@@ -1,6 +1,8 @@
 import re
-from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, Query, HTTPException, status
+import os
+import tempfile
+from typing import Optional, List, Dict
+from fastapi import FastAPI, Query, status
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -8,85 +10,69 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 
 app = FastAPI(
     title="YouTube Transcript Extractor API",
-    description="Microservice FastAPI untuk mengambil transkrip video YouTube dengan deteksi bahasa otomatis, dukungan fallback, dan fitur penerjemahan otomatis.",
+    description="API FastAPI sederhana untuk mengekstrak transkrip dari video YouTube secara instan dengan fitur terjemahan otomatis.",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# Mengizinkan CORS agar bisa diakses dari berbagai asal (cross-origin)
+# Konfigurasi CORS agar API dapat diakses dari domain mana pun
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Regular expression untuk mengekstrak Video ID dari berbagai format URL YouTube
+# Regex sekali jalan untuk mengekstrak Video ID (11 karakter) dari URL YouTube apa pun
 YOUTUBE_ID_REGEX = re.compile(
     r'(?:https?:\/\/)?(?:www\.)?(?:m\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})'
 )
 
 def extract_video_id(url_or_id: str) -> Optional[str]:
     """
-    Mengekstrak 11-karakter video ID dari string input (bisa berupa ID langsung atau URL YouTube lengkap).
+    Ekstrak 11 digit Video ID dari string masukan (baik URL penuh maupun ID langsung).
     """
+    if not url_or_id:
+        return None
+    url_or_id = url_or_id.strip()
+    # Jika masukan sudah berupa ID 11 karakter yang valid
     if len(url_or_id) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', url_or_id):
         return url_or_id
     
     match = YOUTUBE_ID_REGEX.search(url_or_id)
-    if match:
-        return match.group(1)
-    return None
+    return match.group(1) if match else None
 
-class TranscriptSegment(BaseModel):
-    text: str = Field(..., description="Teks transkrip pada segmen tertentu")
-    start: float = Field(..., description="Waktu mulai dalam detik")
-    duration: float = Field(..., description="Durasi segmen dalam detik")
 
-class TranscriptResponse(BaseModel):
-    success: bool = Field(..., description="Status keberhasilan operasi")
-    video_id: str = Field(..., description="ID dari video YouTube")
-    original_language: str = Field(..., description="Bahasa asli transkrip asal")
-    retrieved_language: str = Field(..., description="Bahasa transkrip yang berhasil didapatkan")
-    is_translated: bool = Field(..., description="Apakah transkrip merupakan hasil terjemahan otomatis")
-    was_fallback_used: bool = Field(..., description="Apakah sistem menggunakan fallback bahasa lain")
-    is_generated: bool = Field(..., description="Apakah transkrip berupa auto-generated")
-    full_text: str = Field(..., description="Seluruh teks transkrip yang digabungkan")
-    segments: List[TranscriptSegment] = Field(..., description="Detail segmen transkrip beserta timestamp")
-
-class ErrorResponse(BaseModel):
-    success: bool = Field(False)
-    error: str = Field(..., description="Pesan error/detail kendala")
-    code: str = Field(..., description="Kode error sistem untuk integrasi")
-
+# Schema masukan untuk metode POST
 class TranscriptRequest(BaseModel):
-    url_or_id: str = Field(..., description="URL video YouTube lengkap atau 11-karakter Video ID", example="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-    target_lang: str = Field("id", description="Kode bahasa utama yang diinginkan (ISO 639-1)", example="id")
+    url_or_id: str = Field(..., description="ID video atau URL video YouTube lengkap", example="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    target_lang: str = Field("id", description="Kode bahasa target (default: 'id' untuk Bahasa Indonesia)", example="id")
+    proxy: Optional[str] = Field(None, description="URL proxy kustom jika diperlukan (opsional)", example="http://username:password@proxyserver.com:8080")
+    cookies: Optional[str] = Field(None, description="Teks cookie Netscape untuk bypass pemblokiran (opsional)", example=None)
+
 
 @app.get("/", include_in_schema=False)
 def root():
-    """ Mengalihkan halaman utama (/) ke dokumentasi Swagger (/docs) """
+    # Arahkan halaman utama ke Swagger UI docs agar interaktif
     return RedirectResponse(url="/docs")
 
-@app.get("/api/health", response_model=Dict[str, str], tags=["Sistem"])
+
+@app.get("/api/health", tags=["Sistem"])
 def health_check():
-    """ Cek kesehatan server / microservice """
     return {"status": "healthy", "service": "YouTube Transcript Extractor"}
 
-@app.get("/api/transcript", response_model=TranscriptResponse, responses={
-    400: {"model": ErrorResponse},
-    404: {"model": ErrorResponse},
-    500: {"model": ErrorResponse}
-}, tags=["Transkrip"])
+
+@app.get("/api/transcript", tags=["Transkrip"])
 def get_transcript_query(
-    video: str = Query(..., description="Video ID atau URL YouTube lengkap", example="dQw4w9WgXcQ"),
-    lang: str = Query("id", description="Kode bahasa utama yang ditargetkan (default: 'id' / Indonesia)", example="id")
+    video: str = Query(..., description="Video ID atau URL YouTube lengkap"),
+    lang: str = Query("id", description="Kode bahasa target (contoh: 'id', 'en')"),
+    proxy: Optional[str] = Query(None, description="URL proxy kustom (opsional)"),
+    cookies: Optional[str] = Query(None, description="Teks cookie Netscape (opsional)")
 ):
     """
-    Mengambil transkrip YouTube dengan deteksi bahasa otomatis, dukungan fallback, dan terjemahan otomatis.
-    Metode GET ini ideal untuk integrasi cepat via query string.
+    Mengambil transkrip YouTube via GET Query string.
     """
     video_id = extract_video_id(video)
     if not video_id:
@@ -94,22 +80,17 @@ def get_transcript_query(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "success": False,
-                "error": "ID Video YouTube tidak valid. Pastikan format URL atau ID sepanjang 11 karakter sudah benar.",
+                "error": "ID Video YouTube tidak valid. Pastikan URL atau ID video benar.",
                 "code": "INVALID_VIDEO_ID"
             }
         )
-    
-    return process_transcript_extraction(video_id, lang)
+    return process_transcript(video_id, lang, proxy, cookies)
 
-@app.post("/api/transcript", response_model=TranscriptResponse, responses={
-    400: {"model": ErrorResponse},
-    404: {"model": ErrorResponse},
-    500: {"model": ErrorResponse}
-}, tags=["Transkrip"])
+
+@app.post("/api/transcript", tags=["Transkrip"])
 def get_transcript_post(payload: TranscriptRequest):
     """
-    Mengambil transkrip YouTube dengan deteksi bahasa otomatis, dukungan fallback, dan terjemahan otomatis.
-    Metode POST ini menggunakan request body berformat JSON untuk fleksibilitas struktural yang lebih baik.
+    Mengambil transkrip YouTube via POST dengan request body JSON.
     """
     video_id = extract_video_id(payload.url_or_id)
     if not video_id:
@@ -117,134 +98,182 @@ def get_transcript_post(payload: TranscriptRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "success": False,
-                "error": "ID Video YouTube tidak valid. Pastikan format URL atau ID sepanjang 11 karakter sudah benar.",
+                "error": "ID Video YouTube tidak valid. Pastikan URL atau ID video benar.",
                 "code": "INVALID_VIDEO_ID"
             }
         )
-    return process_transcript_extraction(video_id, payload.target_lang)
+    return process_transcript(video_id, payload.target_lang, payload.proxy, payload.cookies)
 
-def process_transcript_extraction(video_id: str, target_lang: str):
+
+def process_transcript(video_id: str, target_lang: str, request_proxy: Optional[str], request_cookies: Optional[str]):
     """
-    Logika utama penarikan transkrip dengan strategi fallback dan penerjemahan.
+    Fungsi utama untuk mengambil transkrip video YouTube secara aman dengan sistem fallback bahasa
+    dan fitur terjemahan otomatis.
     """
-    # Normalisasi kode bahasa ke huruf kecil
     target_lang = target_lang.lower().strip()
     
-    try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-    except TranscriptsDisabled:
-         return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "success": False,
-                "error": "Transkrip/subtitle dinonaktifkan untuk video ini oleh pengunggah.",
-                "code": "TRANSCRIPTS_DISABLED"
-            }
-        )
-    except VideoUnavailable:
-         return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "success": False,
-                "error": "Video tidak tersedia atau tidak dapat ditemukan (mungkin dihapus, di-private, atau link salah).",
-                "code": "VIDEO_UNAVAILABLE"
-            }
-        )
-    except Exception as e:
-         return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "success": False,
-                "error": f"Gagal membaca daftar transkrip karena kendala eksternal: {str(e)}",
-                "code": "ERROR_LISTING_TRANSCRIPTS"
-            }
-        )
+    # 1. Konfigurasi Proxy (untuk menghindari IP ban / 403 Forbidden)
+    proxy_url = request_proxy or os.getenv("YOUTUBE_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
-    transcript = None
-    was_fallback_used = False
-    original_lang = None
-    is_translated = False
-
-    # Langkah 1: Cari transkrip asli dalam target_lang (misal 'id') secara presisi
-    try:
-        transcript = transcript_list.find_transcript([target_lang])
-        original_lang = transcript.language_code
-    except NoTranscriptFound:
-        pass
-
-    # Langkah 2: Jika gagal, cari bahasa Inggris ('en') sebagai fallback utama
-    if not transcript and target_lang != "en":
+    # 2. Konfigurasi Cookies via file temporer (untuk memverifikasi akun / mencegah pembatasan)
+    cookies_content = request_cookies or os.getenv("YOUTUBE_COOKIES")
+    cookies_file_path = None
+    
+    if cookies_content and cookies_content.strip():
         try:
-            transcript = transcript_list.find_transcript(["en"])
-            original_lang = transcript.language_code
-            was_fallback_used = True
+            fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                tmp.write(cookies_content)
+            cookies_file_path = temp_path
+        except Exception as e:
+            print(f"[Warning] Gagal memuat cookie sementara: {str(e)}")
+
+    try:
+        # Step 1: Dapatkan semua daftar transkrip yang tersedia dari video ini
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(
+                video_id, 
+                proxies=proxies, 
+                cookies=cookies_file_path
+            )
+        except TranscriptsDisabled:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error": "Transkrip/subtitle dinonaktifkan atau tidak tersedia untuk video ini.",
+                    "code": "TRANSCRIPTS_DISABLED"
+                }
+            )
+        except VideoUnavailable:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "success": False,
+                    "error": "Video YouTube tidak tersedia (mungkin dihapus, di-private, atau link salah).",
+                    "code": "VIDEO_UNAVAILABLE"
+                }
+            )
+        except Exception as e:
+            err_msg = str(e)
+            user_friendly_err = f"Gagal mengambil transkrip: Encountered error: {err_msg}"
+            err_code = "SERVER_ERROR"
+            
+            # Deteksi apakah IP diblokir oleh YouTube (Sangat umum terjadi pada penyedia Cloud seperti Vercel/Render)
+            if any(hint in err_msg for hint in ["RequestBlocked", "IpBlocked", "Too Many Requests", "403", "429"]):
+                user_friendly_err = (
+                    "Permintaan diblokir oleh YouTube (Error 403 / IP Blocked). "
+                    "Hal ini terjadi karena IP publik serverless/cloud hosting (seperti Vercel) sering diblokir secara massal oleh YouTube. "
+                    "Solusi: Gunakan parameter 'proxy' dengan proxy residensial aktif, "
+                    "atau unggah cookie browser Anda ke parameter 'cookies_txt' agar dikenali sebagai pengguna manusia."
+                )
+                err_code = "YOUTUBE_IP_BLOCKED"
+                
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "success": False,
+                    "error": user_friendly_err,
+                    "code": err_code
+                }
+            )
+
+        # Step 2: Cari transkrip yang paling tepat menggunakan strategi fallback cerdas
+        selected_transcript = None
+        was_fallback_used = False
+        original_lang = None
+        is_translated = False
+
+        # 1. Coba cari bahasa target langsung (misalnya Bahasa Indonesia 'id')
+        try:
+            selected_transcript = transcript_list.find_transcript([target_lang])
+            original_lang = selected_transcript.language_code
         except NoTranscriptFound:
             pass
 
-    # Langkah 3: Jika belum ketemu, ambil transkrip pertama yang ada tanpa memandang bahasa (bahasa bawaan pembuat video)
-    if not transcript:
-        try:
-            all_transcripts = list(transcript_list)
-            if all_transcripts:
-                transcript = all_transcripts[0]
-                original_lang = transcript.language_code
-                was_fallback_used = True
-        except Exception:
-            pass
-
-    # Jika semua langkah gagal dan tidak ada transkrip sama sekali
-    if not transcript:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "success": False,
-                "error": f"Tidak ditemukan transkrip dalam bahasa target ({target_lang}) ataupun bahasa fallback lainnya.",
-                "code": "NO_TRANSCRIPT_FOUND"
-            }
-        )
-
-    # Langkah 4: Jika bahasa transkrip yang didapatkan tidak cocok dengan bahasa target, lakukan auto-translation jika memungkinkan
-    final_transcript_obj = transcript
-    if transcript.language_code != target_lang:
-        if transcript.is_translatable:
+        # 2. Jika tidak ada, coba cari bahasa Inggris ('en') sebagai fallback utama
+        if not selected_transcript and target_lang != "en":
             try:
-                final_transcript_obj = transcript.translate(target_lang)
-                is_translated = True
-            except Exception as e:
-                # Terjemahan gagal, fallback ke transkrip orisinal yang terpilih tanpa translate
+                selected_transcript = transcript_list.find_transcript(["en"])
+                original_lang = selected_transcript.language_code
+                was_fallback_used = True
+            except NoTranscriptFound:
                 pass
 
-    # Langkah 5: Unduh data segmen transkrip aktual
-    try:
-        segments_raw = final_transcript_obj.fetch()
-        full_text = " ".join([seg['text'] for seg in segments_raw]).strip()
-        
-        # Bersihkan spasi atau baris baru ganda di teks segmen
-        cleaned_segments = []
-        for seg in segments_raw:
-            cleaned_segments.append({
-                "text": " ".join(seg['text'].split()),
-                "start": float(seg['start']),
-                "duration": float(seg['duration'])
-            })
+        # 3. Jika masih tidak ada, ambil bahasa pertama apa pun yang tersedia di video tersebut
+        if not selected_transcript:
+            try:
+                all_transcripts = list(transcript_list)
+                if all_transcripts:
+                    selected_transcript = all_transcripts[0]
+                    original_lang = selected_transcript.language_code
+                    was_fallback_used = True
+            except Exception:
+                pass
 
-        return {
-            "success": True,
-            "video_id": video_id,
-            "original_language": original_lang,
-            "retrieved_language": final_transcript_obj.language_code,
-            "is_translated": is_translated,
-            "was_fallback_used": was_fallback_used,
-            "is_generated": transcript.is_generated,
-            "full_text": full_text,
-            "segments": cleaned_segments
-        }
-    except Exception as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "success": False,
-                "error": f"Gagal mengekstrak teks segmen transkrip: {str(e)}",
-                "code": "ERROR_FETCHING_SEGMENTS"
+        # Jika sama sekali tidak ada transkrip yang ditemukan
+        if not selected_transcript:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "success": False,
+                    "error": f"Tidak ditemukan transkrip dalam bahasa target ({target_lang}) maupun bahasa cadangan lainnya.",
+                    "code": "NO_TRANSCRIPT_FOUND"
+                }
+            )
+
+        # Step 3: Jika bahasa asli berbeda dengan bahasa target, manfaatkan auto-translate YouTube
+        final_transcript_obj = selected_transcript
+        if selected_transcript.language_code != target_lang:
+            if selected_transcript.is_translatable:
+                try:
+                    final_transcript_obj = selected_transcript.translate(target_lang)
+                    is_translated = True
+                except Exception:
+                    # Jika penerjemahan otomatis gagal, pakai bahasa asli video apa adanya
+                    pass
+
+        # Step 4: Tarik data teks per-segmen dan gabungkan
+        try:
+            raw_segments = final_transcript_obj.fetch()
+            
+            # Format pembersihan segmen
+            cleaned_segments = []
+            for item in raw_segments:
+                cleaned_segments.append({
+                    "text": " ".join(item['text'].split()), # merapikan whitespace
+                    "start": float(item['start']),
+                    "duration": float(item['duration'])
+                })
+
+            full_text = " ".join([seg['text'] for seg in cleaned_segments]).strip()
+
+            return {
+                "success": True,
+                "video_id": video_id,
+                "original_language": original_lang,
+                "retrieved_language": final_transcript_obj.language_code,
+                "is_translated": is_translated,
+                "was_fallback_used": was_fallback_used,
+                "is_generated": selected_transcript.is_generated,
+                "full_text": full_text,
+                "segments": cleaned_segments
             }
-        )
+        except Exception as e:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "success": False,
+                    "error": f"Gagal mengekstrak teks segmen transkrip: {str(e)}",
+                    "code": "SEGMENT_FETCH_ERROR"
+                }
+            )
+
+    finally:
+        # Selalu hapus file cookies sementara agar tidak memakan memori disk
+        if cookies_file_path and os.path.exists(cookies_file_path):
+            try:
+                os.remove(cookies_file_path)
+            except Exception:
+                pass
