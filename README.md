@@ -101,16 +101,18 @@ Metode tercepat menggunakan parameter query untuk menarik transkrip langsung.
 - **Parameter URL / Query String**:
   - `video` (Wajib, berupa 11-karakter ID Video ATAU URL Video Youtube lengkap)
   - `lang` (Opsional, kode bahasa target ISO 639-1, default ke `id` jika tidak disertakan)
+  - `proxy` (Opsional, URL proxy kustom gratis / berbayar Anda seperti `http://user:pass@domain:port`)
+  - `cookies` (Opsional, string teks cookie berformat Netscape untuk bypass age-restriction / rate-limit)
   
 - **Contoh Permintaan**:
   ```http
-  GET /api/transcript?video=https://www.youtube.com/watch?v=dQw4w9WgXcQ&lang=id
+  GET /api/transcript?video=https://www.youtube.com/watch?v=dQw4w9WgXcQ&lang=id&proxy=http://username:password@proxyserver.com:8080
   ```
 
 ---
 
 ### 3. Mengambil Transkrip (Metode POST)
-Lebih disarankan untuk integrasi sistem yang lebih rapi karena parameter dibungkus dalam JSON payload.
+Lebih disarankan untuk integrasi sistem yang lebih rapi karena parameter dibungkus dalam JSON payload dan memfasilitasi pengiriman data cookie yang panjang.
 
 - **URL**: `/api/transcript`
 - **Method**: `POST`
@@ -119,7 +121,9 @@ Lebih disarankan untuk integrasi sistem yang lebih rapi karena parameter dibungk
   ```json
   {
     "url_or_id": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "target_lang": "id"
+    "target_lang": "id",
+    "proxy": "http://username:password@proxyserver.com:8080",
+    "cookies": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t..."
   }
   ```
 
